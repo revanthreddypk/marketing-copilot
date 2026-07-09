@@ -7,14 +7,14 @@ import N8n from "./pages/N8n.jsx";
 import YouTube from "./pages/YouTube.jsx";
 import Email from "./pages/Email.jsx";
 import AdCopy from "./pages/AdCopy.jsx";
+import Analyser from "./pages/Analyser.jsx";
 
 // ─── Put your links here ────────────────────────────────────────────────
-const PORTFOLIO_URL = "#";
-const LINKEDIN_URL  = "#";
-const GITHUB_URL    = "#";
+const LINKEDIN_URL = "https://www.linkedin.com/in/YOUR-LINKEDIN-HANDLE";  // ← set this
+const GITHUB_URL   = "https://github.com/revanthreddypk/marketing-copilot";
 // ────────────────────────────────────────────────────────────────────────
 
-const PAGES = { home: Home, docs: Docs, planner: Planner, n8n: N8n, youtube: YouTube, email: Email, adcopy: AdCopy };
+const PAGES = { home: Home, docs: Docs, planner: Planner, n8n: N8n, youtube: YouTube, email: Email, adcopy: AdCopy, analyser: Analyser };
 
 export default function App() {
   const [page, setPage] = useState("home");
@@ -59,8 +59,7 @@ export default function App() {
           <p>An open-source AI marketing suite. Clone the repo, add any AI provider's key — or run it free with Ollama — and deploy to Vercel in minutes. Built by a digital-marketing &amp; AI-automation professional in the UAE.</p>
         </div>
         <div className="cta-row">
-          <a className="primary" href={PORTFOLIO_URL} target="_blank" rel="noopener">Portfolio</a>
-          <a className="ghost" href={LINKEDIN_URL} target="_blank" rel="noopener">LinkedIn</a>
+          <a className="primary" href={LINKEDIN_URL} target="_blank" rel="noopener">LinkedIn</a>
           <a className="ghost" href={GITHUB_URL} target="_blank" rel="noopener">GitHub</a>
         </div>
       </div>

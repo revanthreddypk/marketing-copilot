@@ -150,6 +150,96 @@ merge | n8n-nodes-base.merge | v3 | logic | params: mode
 splitInBatches | n8n-nodes-base.splitInBatches | v3 | logic | params: batchSize
 `.trim();
 
+
+/* ------------- page fact extraction (rendered-ish DOM parse) ------------- */
+async function fetchRaw(url) {
+  const u = /^https?:\/\//i.test(url) ? url : "https://" + url;
+  const r = await fetch(u, { headers: { "user-agent": "Mozilla/5.0 (compatible; MarketingCoPilotBot/1.0)" }, redirect: "follow" });
+  return { status: r.status, finalUrl: r.url, html: await r.text() };
+}
+
+function extractFacts(html, url) {
+  const pick = (re) => { const m = html.match(re); return m ? m[1].trim() : null; };
+  const all = (re) => { const out = []; let m; const r = new RegExp(re.source, re.flags.includes("g") ? re.flags : re.flags + "g"); while ((m = r.exec(html))) out.push(m[1]); return out; };
+
+  const title = pick(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  const metaDesc = pick(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']*)["']/i)
+                || pick(/<meta[^>]+content=["']([^"']*)["'][^>]+name=["']description["']/i);
+  const canonical = pick(/<link[^>]+rel=["']canonical["'][^>]+href=["']([^"']+)["']/i)
+                 || pick(/<link[^>]+href=["']([^"']+)["'][^>]+rel=["']canonical["']/i);
+  const robots = pick(/<meta[^>]+name=["']robots["'][^>]+content=["']([^"']*)["']/i);
+  const h1s = all(/<h1[^>]*>([\s\S]*?)<\/h1>/gi).map((t) => t.replace(/<[^>]+>/g, "").trim());
+  const h2s = all(/<h2[^>]*>([\s\S]*?)<\/h2>/gi).map((t) => t.replace(/<[^>]+>/g, "").trim()).slice(0, 12);
+  const imgTags = html.match(/<img[^>]*>/gi) || [];
+  const imgsWithAlt = imgTags.filter((t) => /alt=["'][^"']+["']/i.test(t)).length;
+  const hreflang = all(/<link[^>]+hreflang=["']([^"']+)["']/gi);
+  const jsonld = (html.match(/<script[^>]+application\/ld\+json[^>]*>([\s\S]*?)<\/script>/gi) || []).join(" ");
+  const schemaTypes = [...new Set((jsonld.match(/"@type"\s*:\s*"([^"]+)"/g) || []).map((t) => t.split('"')[3]))];
+  const text = html.replace(/<script[\s\S]*?<\/script>/gi, " ").replace(/<style[\s\S]*?<\/style>/gi, " ")
+                   .replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/\s+/g, " ").trim();
+  const words = text ? text.split(" ").length : 0;
+  const host = (() => { try { return new URL(/^https?:/.test(url) ? url : "https://" + url).host; } catch { return ""; } })();
+  const links = all(/<a[^>]+href=["']([^"']+)["']/gi);
+  const internal = links.filter((h) => h.startsWith("/") || h.includes(host)).length;
+
+  // is the canonical self-referencing?
+  let canonSelf = null;
+  if (canonical) { try { canonSelf = new URL(canonical).pathname.replace(/\/$/, "") === new URL(/^https?:/.test(url) ? url : "https://" + url).pathname.replace(/\/$/, ""); } catch { canonSelf = null; } }
+
+  // AEO signals
+  const hasFaqSchema = /FAQPage/i.test(jsonld);
+  const hasOrgSchema = /"@type"\s*:\s*"Organization"/i.test(jsonld);
+  const hasSameAs = /"sameAs"/i.test(jsonld);
+  const firstPara = (text.slice(0, 600).match(/[^.]+\.[^.]+\.[^.]+\./) || [""])[0];
+  const externalLinks = links.filter((h) => /^https?:\/\//i.test(h) && !h.includes(host)).length;
+  const hasTable = /<table[\s>]/i.test(html);
+
+  return {
+    title, titleLen: title ? title.length : 0,
+    metaDesc, metaDescLen: metaDesc ? metaDesc.length : 0,
+    canonical, canonicalSelfReferencing: canonSelf,
+    robots, h1Count: h1s.length, h1: h1s[0] || null, h2Sample: h2s,
+    images: imgTags.length, imagesWithAlt: imgsWithAlt,
+    hreflangTags: hreflang, wordCount: words,
+    schemaTypes, hasProductSchema: schemaTypes.includes("Product"),
+    hasFaqSchema, hasOrgSchema, hasSameAs, hasBreadcrumb: schemaTypes.includes("BreadcrumbList"),
+    internalLinks: internal, externalLinks, hasComparisonTable: hasTable,
+    openingText: firstPara, textSample: text.slice(0, 2500)
+  };
+}
+
+async function fetchRobots(url) {
+  try {
+    const o = new URL(/^https?:/.test(url) ? url : "https://" + url).origin;
+    const r = await fetch(o + "/robots.txt");
+    if (!r.ok) return { found: false, aiCrawlers: {} };
+    const t = await r.text();
+    const bots = ["GPTBot", "ClaudeBot", "PerplexityBot", "Google-Extended", "CCBot"];
+    const aiCrawlers = {};
+    bots.forEach((b) => { aiCrawlers[b] = new RegExp("User-agent:\\s*" + b, "i").test(t) ? "declared" : "undeclared"; });
+    return { found: true, aiCrawlers, hasLlmsTxt: false, raw: t.slice(0, 800) };
+  } catch { return { found: false, aiCrawlers: {} }; }
+}
+
+async function fetchPSI(url, strategy) {
+  try {
+    const key = process.env.PAGESPEED_API_KEY;
+    const u = `https://www.googleapis.com/pagespeedonline/v5/runPagespeed?url=${encodeURIComponent(url)}&strategy=${strategy}&category=performance${key ? "&key=" + key : ""}`;
+    const r = await fetch(u);
+    if (!r.ok) return null;
+    const d = await r.json();
+    const lh = d.lighthouseResult;
+    const cr = d.loadingExperience?.metrics || {};
+    return {
+      score: lh ? Math.round(lh.categories.performance.score * 100) : null,
+      lcp: cr.LARGEST_CONTENTFUL_PAINT_MS ? (cr.LARGEST_CONTENTFUL_PAINT_MS.percentile / 1000).toFixed(1) + "s" : lh?.audits?.["largest-contentful-paint"]?.displayValue || null,
+      inp: cr.INTERACTION_TO_NEXT_PAINT ? cr.INTERACTION_TO_NEXT_PAINT.percentile + "ms" : null,
+      cls: cr.CUMULATIVE_LAYOUT_SHIFT_SCORE ? (cr.CUMULATIVE_LAYOUT_SHIFT_SCORE.percentile / 100).toFixed(2) : lh?.audits?.["cumulative-layout-shift"]?.displayValue || null,
+      fieldData: !!cr.LARGEST_CONTENTFUL_PAINT_MS
+    };
+  } catch { return null; }
+}
+
 /* ------------------------------ prompts ------------------------------ */
 const P = {
   /* ---- Campaign plan: strategy sections (numbers stay calculated) ---- */
@@ -274,6 +364,74 @@ Return ONLY valid JSON:
 }
 Produce exactly ${p.count} emails. Body is an array of paragraphs; use {{first_name}} merge tags.`}),
 
+  analyse: (p) => ({ max: 16000,
+    system: `You are a senior technical SEO auditor and CRO specialist with 20 years' experience, working the UAE market. You are given REAL measured facts about a page. Never invent a fact that isn't in the data — if something wasn't measured, say so. Your judgements must follow from the evidence.
+
+Severity scale: Critical = blocks indexing or rankings. High = measurable traffic loss. Medium = missed opportunity. Low = polish.
+
+You also predict visual attention. You are given the page's structural elements. For each device, lay them out plausibly and score visual saliency (size, contrast, position, isolation), then order the gaze: mobile follows an F-pattern, desktop a Z-pattern. Coordinates are percentages of the viewport (0-100).
+
+Never promise traffic percentages. Auditors who predict "+30% in 8 weeks" are guessing.`,
+    user: `Analyse this page.
+
+URL: ${p.url}
+Target keyword: ${p.keyword || "(not given)"}
+Page type: ${p.pageType} | Market: ${p.market} | Conversion goal: ${p.goal}
+
+MEASURED FACTS (from the fetched page — treat as ground truth):
+${JSON.stringify(p.facts, null, 1)}
+
+ROBOTS.TXT / AI CRAWLERS:
+${JSON.stringify(p.robots, null, 1)}
+
+CORE WEB VITALS (Google PageSpeed Insights, null = unavailable):
+mobile: ${JSON.stringify(p.psiMobile)}
+desktop: ${JSON.stringify(p.psiDesktop)}
+
+Return ONLY valid JSON:
+{
+ "verdict":{"headline":"one sharp sentence","summary":"3-4 sentences a CEO would read","blocker":{"title":"","detail":"","affects":"both|mobile|desktop"}},
+ "scores":{"mobile":0-100,"desktop":0-100,
+   "categories":[{"name":"Indexability","m":0,"d":0,"deviceAgnostic":true},
+                 {"name":"On-page","m":0,"d":0,"deviceAgnostic":true},
+                 {"name":"Performance","m":0,"d":0,"deviceAgnostic":false},
+                 {"name":"Structured data","m":0,"d":0,"deviceAgnostic":true},
+                 {"name":"E-E-A-T","m":0,"d":0,"deviceAgnostic":true},
+                 {"name":"AEO / AI","m":0,"d":0,"deviceAgnostic":true},
+                 {"name":"Conversion & UX","m":0,"d":0,"deviceAgnostic":false},
+                 {"name":"Attention","m":0,"d":0,"deviceAgnostic":false}]},
+ "working":["",""],
+ "broken":["",""],
+ "quickest":"the 20% of work that gets 80% of the result, with a time estimate",
+ "attention":{
+   "mobile":{"fold":420,"viewport":"390 × 844","aboveFold":"71%","ctaShare":"18%","trustShare":"4%","timeToCta":"2.4s",
+     "elements":[{"label":"Product image","x":50,"y":20,"w":92,"h":26,"heat":"high|med|low"}],
+     "gaze":[{"n":1,"label":"","note":""}],
+     "findings":["",""]},
+   "desktop":{"fold":820,"viewport":"1440 × 900","aboveFold":"","ctaShare":"","trustShare":"","timeToCta":"",
+     "elements":[{"label":"","x":0,"y":0,"w":0,"h":0,"heat":"high"}],
+     "gaze":[{"n":1,"label":"","note":""}],
+     "findings":["",""]}},
+ "deviceInsight":"one paragraph comparing mobile vs desktop and saying which to fix first, and why",
+ "issues":[{"id":1,"issue":"","category":"Index|On-page|Perf|Schema|E-E-A-T|AEO|Mobile|Desktop|CRO",
+   "location":"","severity":"Critical|High|Medium|Low","why":"",
+   "fixSteps":["",""],"code":"code snippet or empty string","effort":"30m","owner":"Dev|Content|Design"}],
+ "aeo":{"score":0,"intro":"why AEO matters for this page",
+   "steps":[{"n":1,"title":"","why":"","template":"copy-paste text or empty","code":"code snippet or empty","checks":["",""]}],
+   "howToMeasure":""},
+ "roadmap":{"quickWins":[{"task":"","severity":"","note":"","effort":"","owner":""}],
+   "strategic":[{"task":"","severity":"","note":"","effort":"","owner":""}],
+   "backlog":[{"task":"","severity":"","note":"","effort":"","owner":""}]},
+ "tracking":[{"metric":"","baseline":"","where":"","expected":""}]
+}
+
+Rules:
+- Base EVERY issue on the measured facts above. If canonicalSelfReferencing is false, that is Critical. If hreflangTags is empty on a bilingual site, that is Critical.
+- Produce 8-18 issues. Include at least 5 AEO issues if AEO signals are weak.
+- attention.elements: 6-9 per device, laid out for that viewport. Mobile is single-column; desktop is typically two-column. Coordinates are % of viewport; y beyond the fold is allowed.
+- aeo.steps: 5-6 steps, each with a real template or code snippet the user can paste.
+- Effort estimates in minutes/hours. Sum the quick wins in "quickest".`}),
+
   /* ---- n8n workflow ---- */
   n8n: (p) => ({ max: 14000,
     system: `You design n8n workflows. You may ONLY use nodes from this verified library — never invent node types. Always use the exact "type" string and typeVersion given:
@@ -351,6 +509,20 @@ export default async function handler(req, res_) {
     if (!P[type]) { res_.status(400).json({ error: "Unknown type: " + type }); return; }
 
     const p = { ...payload };
+
+    if (type === "analyse") {
+      if (!p.url) { res_.status(400).json({ error: "A page URL is required." }); return; }
+      let raw;
+      try { raw = await fetchRaw(p.url); }
+      catch (e) { res_.status(200).json({ fetchFailed: true, message: "Couldn't fetch that page. It may be blocked, offline, or behind a login." }); return; }
+      if (raw.status >= 400) { res_.status(200).json({ fetchFailed: true, message: `The page returned HTTP ${raw.status}. Fix that before auditing anything else.` }); return; }
+      p.facts = extractFacts(raw.html, p.url);
+      p.facts.httpStatus = raw.status;
+      p.robots = await fetchRobots(p.url);
+      const [pm, pd] = await Promise.all([fetchPSI(p.url, "mobile"), fetchPSI(p.url, "desktop")]);
+      p.psiMobile = pm; p.psiDesktop = pd;
+    }
+
     if (type === "brandScan") {
       if (!p.url) { res_.status(400).json({ error: "A website URL is required." }); return; }
       p.pageText = await fetchPageText(p.url);
@@ -392,6 +564,10 @@ export default async function handler(req, res_) {
     }
 
     // Enforce platform + language scope even if the model ignored instructions.
+    if (type === "analyse") {
+      json.evidence = { facts: p.facts, robots: p.robots, psiMobile: p.psiMobile, psiDesktop: p.psiDesktop };
+    }
+
     if (type === "content") {
       const plats = (p.platforms && p.platforms.length) ? p.platforms : null;
       const langs = (p.langs && p.langs.length) ? p.langs : null;

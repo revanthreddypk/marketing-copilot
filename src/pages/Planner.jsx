@@ -89,12 +89,16 @@ export default function Planner({ go, ai }) {
     setCErr(""); setCLoading(true); setContent(null);
     try {
       const inp = inputs();
+      const langs = inp.language === "both" ? ["en", "ar"] : [inp.language];
+      const platNames = inp.platforms.map((k) => PLATFORMS[k].short);
       setContent(await generate("content", {
         business: inp.business, voice: brand?.voice, proof: brand?.proof || x.proof,
         brief: cBrief || inp.brief, offer: inp.offer,
         objective: OBJECTIVES[inp.objective].label, location: inp.location,
-        language: LANGUAGES[inp.language], types: cTypes.map((t) => CONTENT_TYPES[t])
+        platforms: platNames, langs,
+        types: cTypes.map((t) => CONTENT_TYPES[t])
       }));
+      setAdLang(langs[0]);
     } catch (e) { setCErr(e.message); }
     setCLoading(false);
   }
@@ -384,42 +388,49 @@ function Overview({ plan, S, fb, pick, hasAI }) {
 
 /* ---------------- Content tab output ---------------- */
 export function ContentOut({ c, adLang, setAdLang }) {
-  const meta = c.adsMeta || [];
-  const shown = meta.filter((v) => v.lang === adLang);
+  const ads = c.ads || [];
+  const langs = [...new Set(ads.map((a) => a.lang))];
+  const plats = [...new Set(ads.map((a) => a.platform))];
+  const forPlat = (p) => ads.filter((a) => a.platform === p && a.lang === adLang);
+  const L = { en: "English", ar: "العربية" };
   let n = 0;
+
   return (
     <>
-      {meta.length > 0 && (
-        <Block n={++n} title="Ad copy — Meta" ai>
-          <div className="tabs" style={{ display: "inline-flex", marginBottom: 12 }}>
-            <button className={"chk" + (adLang === "en" ? " on" : "")} onClick={() => setAdLang("en")}>English</button>
-            <button className={"chk" + (adLang === "ar" ? " on" : "")} style={{ marginLeft: 6 }} onClick={() => setAdLang("ar")}>العربية</button>
-          </div>
-          <div className="adgrid">
-            {shown.map((v, i) => (
-              <div className="ad" key={i} dir={v.lang === "ar" ? "rtl" : "ltr"}>
-                <CopyBtn text={`${v.headline}\n\n${v.primary}`} rtl={v.lang === "ar"} />
-                <div className="vlab">{v.angle}</div>
-                <h5>{v.headline}</h5><p className="body">{v.primary}</p>
-                <span className="cta">{v.cta}</span>
-              </div>))}
-          </div>
-          {!shown.length && <p className="disclaimer">No {adLang.toUpperCase()} variants for this language setting.</p>}
+      {c.truncated && <div className="err">The model was cut off before finishing. Try a shorter brief.</div>}
+
+      {langs.length > 1 && (
+        <div style={{ display: "flex", gap: 6 }}>
+          {langs.map((l) => (
+            <button key={l} className={"chk" + (adLang === l ? " on" : "")} onClick={() => setAdLang(l)}>{L[l] || l}</button>))}
+        </div>)}
+
+      {plats.map((p) => {
+        const list = forPlat(p);
+        if (!list.length) return null;
+        return (
+          <Block key={p} n={++n} title={`Ad copy — ${p} · ${L[adLang] || adLang}`} ai>
+            <div className="adgrid">
+              {list.map((v, i) => (
+                <div className="ad" key={i} dir={v.lang === "ar" ? "rtl" : "ltr"}>
+                  <CopyBtn text={`${v.headline}\n\n${v.primary}`} rtl={v.lang === "ar"} />
+                  <div className="vlab">{v.angle}</div>
+                  <h5>{v.headline}</h5><p className="body">{v.primary}</p>
+                  <span className="cta">{v.cta}</span>
+                </div>))}
+            </div>
+          </Block>);
+      })}
+
+      {c.googleRSA && (
+        <Block n={++n} title="Google — Responsive Search Ad" ai>
+          <ul className="tight">
+            <li><b>Headlines:</b> {(c.googleRSA.headlines || []).join(" · ")}</li>
+            <li><b>Descriptions:</b> {(c.googleRSA.descriptions || []).join(" ")}</li>
+          </ul>
         </Block>)}
 
-      {(c.adsGoogle || c.adsTikTok) && (
-        <Block n={++n} title="Ad copy — Google & TikTok" ai>
-          {c.adsGoogle && <div className="stack"><div className="stack-h">Google · Responsive Search Ad</div>
-            <ul className="tight">
-              <li><b>Headlines:</b> {(c.adsGoogle.headlines || []).join(" · ")}</li>
-              <li><b>Descriptions:</b> {(c.adsGoogle.descriptions || []).join(" ")}</li>
-            </ul></div>}
-          {c.adsTikTok && <div className="stack"><div className="stack-h">TikTok</div>
-            <p className="ptxt"><b>Hook:</b> {c.adsTikTok.hook}</p>
-            <p className="ptxt" style={{ marginTop: 6 }}><b>Caption:</b> {c.adsTikTok.caption}</p></div>}
-        </Block>)}
-
-      {(c.hooks || c.videoScript) && (
+      {(c.hooks?.length > 0 || c.videoScript?.length > 0) && (
         <Block n={++n} title="Creative hooks & video script" ai>
           {c.hooks?.length > 0 && <div className="stack"><div className="stack-h">Scroll-stopping hooks</div>
             <ul className="tight">{c.hooks.map((h, i) => <li key={i}>{h}</li>)}</ul></div>}

@@ -32,7 +32,7 @@ const KEYLESS = PROVIDER === "ollama";
 const OLLAMA_URL = BASE_URL || "http://localhost:11434/v1";
 
 /* ------------------------- provider adapters ------------------------- */
-async function callLLM(system, user, maxTokens = 1500) {
+async function callLLM(system, user, maxTokens = 8000) {
   if (PROVIDER === "anthropic") {
     const r = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
@@ -41,7 +41,8 @@ async function callLLM(system, user, maxTokens = 1500) {
     });
     if (!r.ok) throw new Error(`Anthropic ${r.status}: ${(await r.text()).slice(0, 250)}`);
     const d = await r.json();
-    return (d.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+    const txt = (d.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n");
+    return { text: txt, truncated: d.stop_reason === "max_tokens" };
   }
 
   if (PROVIDER === "google") {
@@ -57,7 +58,8 @@ async function callLLM(system, user, maxTokens = 1500) {
     });
     if (!r.ok) throw new Error(`Google ${r.status}: ${(await r.text()).slice(0, 250)}`);
     const d = await r.json();
-    return (d.candidates?.[0]?.content?.parts || []).map((p) => p.text || "").join("\n");
+    const c = d.candidates?.[0];
+    return { text: (c?.content?.parts || []).map((p) => p.text || "").join("\n"), truncated: c?.finishReason === "MAX_TOKENS" };
   }
 
   // openai | compatible | ollama  — all OpenAI chat-completions shaped
@@ -77,14 +79,39 @@ async function callLLM(system, user, maxTokens = 1500) {
   });
   if (!r.ok) throw new Error(`LLM ${r.status}: ${(await r.text()).slice(0, 250)}`);
   const d = await r.json();
-  return d.choices?.[0]?.message?.content || "";
+  const ch = d.choices?.[0];
+  return { text: ch?.message?.content || "", truncated: ch?.finish_reason === "length" };
+}
+
+// Strip fences, isolate the object, and — if the model was cut off mid-stream —
+// close any open strings/brackets so we can still salvage the complete parts.
+function repairJSON(str) {
+  let out = "", inStr = false, esc = false;
+  const stack = [];
+  for (const ch of str) {
+    if (esc) { out += ch; esc = false; continue; }
+    if (ch === "\\" && inStr) { out += ch; esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; out += ch; continue; }
+    if (!inStr) {
+      if (ch === "{" || ch === "[") stack.push(ch);
+      else if (ch === "}" || ch === "]") stack.pop();
+    }
+    out += ch;
+  }
+  if (inStr) out += '"';                       // close a dangling string
+  out = out.replace(/,\s*$/, "");              // drop a trailing comma
+  while (stack.length) out += stack.pop() === "{" ? "}" : "]";
+  return out;
 }
 
 function parseJSON(text) {
   let clean = String(text).replace(/```json/gi, "").replace(/```/g, "").trim();
-  const a = clean.indexOf("{"), b = clean.lastIndexOf("}");
-  if (a > 0 || b < clean.length - 1) clean = clean.slice(a, b + 1);
-  return JSON.parse(clean);
+  const a = clean.indexOf("{");
+  if (a > 0) clean = clean.slice(a);
+  try { return JSON.parse(clean); } catch {}
+  const b = clean.lastIndexOf("}");
+  if (b > 0) { try { return JSON.parse(clean.slice(0, b + 1)); } catch {} }
+  return JSON.parse(repairJSON(clean));        // last resort: salvage a truncated response
 }
 
 async function fetchPageText(url) {
@@ -126,7 +153,7 @@ splitInBatches | n8n-nodes-base.splitInBatches | v3 | logic | params: batchSize
 /* ------------------------------ prompts ------------------------------ */
 const P = {
   /* ---- Campaign plan: strategy sections (numbers stay calculated) ---- */
-  plan: (p) => ({ max: 2200,
+  plan: (p) => ({ max: 10000,
     system: "You are a senior UAE performance-marketing strategist with 30 years' experience. Write specific, practical strategy for THIS exact business. Never generic filler. Be honest about trade-offs.",
     user: `Build the strategy sections of a paid-media plan.
 Business: ${p.business}
@@ -156,7 +183,7 @@ Return ONLY valid JSON:
 3 audiences, 3 tests, 3-4 risks, 4-5 landing points, 4-5 optimisation rules, 5 next steps, one channelRationale per platform.`}),
 
   /* ---- Brand scan from a website ---- */
-  brandScan: (p) => ({ max: 700,
+  brandScan: (p) => ({ max: 1200,
     system: "You extract brand identity from website copy. If the text is thin or missing, say so honestly rather than inventing details.",
     user: `Website: ${p.url}
 Page text (may be partial):
@@ -167,7 +194,7 @@ Return ONLY valid JSON:
 If the page text is empty or unusable, set found=false and leave the other fields as empty strings.`}),
 
   /* ---- Content studio ---- */
-  content: (p) => ({ max: 2600,
+  content: (p) => ({ max: 12000,
     system: "You are a senior UAE performance copywriter and creative director, fluent in English and native Gulf Arabic. Arabic must read as natural UAE marketing Arabic — never a literal translation.",
     user: `Brand: ${p.business}
 Brand voice: ${p.voice || "confident, warm, direct"}
@@ -191,7 +218,7 @@ Return ONLY valid JSON. Include a key ONLY if requested in "Generate":
 For adsMeta produce 2 EN + 2 AR when both languages requested.`}),
 
   /* ---- YouTube: FULL spoken script ---- */
-  youtube: (p) => ({ max: 3000,
+  youtube: (p) => ({ max: 16000,
     system: "You are a YouTube scriptwriter who writes word-for-word spoken VO that a presenter reads on camera. Write how people actually talk: contractions, short sentences, natural rhythm. Include delivery markers in square brackets like [pause] or [smile]. Never write outlines — write the actual words.",
     user: `Topic: ${p.topic}
 Length: ${p.length} | Style: ${p.style} | Tone: ${p.tone}
@@ -217,7 +244,7 @@ Return ONLY valid JSON:
 Write 6-8 sections covering hook, promise, each key point, and outro. The "say" field must be complete readable VO — this is the whole point. Do not summarise it.`}),
 
   /* ---- Email sequence ---- */
-  email: (p) => ({ max: 2800,
+  email: (p) => ({ max: 12000,
     system: "You are an email marketing strategist. You write sequences that respect the reader: no discounting too early, objection before urgency, clean exits. Copy is warm, specific, and short.",
     user: `Business: ${p.business}
 Sequence type: ${p.seqType} | Emails: ${p.count} | Trigger: ${p.trigger}
@@ -236,30 +263,37 @@ Return ONLY valid JSON:
 Produce exactly ${p.count} emails. Body is an array of paragraphs; use {{first_name}} merge tags.`}),
 
   /* ---- n8n workflow ---- */
-  n8n: (p) => ({ max: 3000,
-    system: `You generate n8n workflow JSON. You may ONLY use nodes from this verified library — never invent node types, and always use the exact "type" string and typeVersion given:
+  n8n: (p) => ({ max: 14000,
+    system: `You design n8n workflows. You may ONLY use nodes from this verified library — never invent node types. Always use the exact "type" string and typeVersion given:
 
 ${N8N_NODES}
 
 Rules:
+- YOU decide which nodes the workflow needs. If the user selected apps, prefer them, but add any others required to make the workflow actually work, and drop ones that aren't needed.
+- Not every workflow needs a schedule. If the request implies an incoming event (a message arrives, a form is submitted, a webhook fires), use a webhook trigger. If it's genuinely on-demand, use manualTrigger. Choose what the automation actually requires.
 - Every credential value must literally be "REPLACE_ME" — credentials never travel in a workflow file.
 - "connections" maps each node's NAME to its downstream nodes.
 - Position nodes left-to-right, 220px apart, y=0.
-- If the request needs a node not in the library, say so in "unsupported" and build the closest valid workflow.`,
+- If the request needs capability outside the library, note it in "unsupported" and build the closest workflow that does work.
+- Keep the workflow to the minimum number of nodes that does the job well. Do not pad.`,
     user: `Automation requested: ${p.description}
-Trigger: ${p.trigger} | Frequency: ${p.frequency}
-Apps: ${(p.apps || []).join(", ")}
-Conditions: ${p.conditions || "(none)"}
+Trigger preference: ${p.trigger && p.trigger !== "auto" ? p.trigger : "Let the AI decide what trigger this needs"}
+Frequency (only if schedule-based): ${p.frequency || "n/a"}
+Apps the user selected: ${(p.apps || []).length ? p.apps.join(", ") : "None selected — you choose the nodes this workflow needs"}
+Conditions / filtering: ${p.conditions || "none specified"}
 
 Return ONLY valid JSON:
 {
- "summary":"plain-English description of what it does",
- "unsupported":"" ,
+ "summary":"2-3 sentences in plain English: what this workflow does, when it runs, and what the user ends up with",
+ "howItWorks":["step-by-step explanation of what each node does and why it's there"],
+ "nodesChosen":[{"name":"","type":"friendly name e.g. Google Sheets","role":"why this node is in the workflow"}],
+ "triggerReason":"one sentence explaining why you chose this trigger type",
+ "unsupported":"",
  "flow":[{"name":"","kind":"trigger|action|logic|ai"}],
  "workflow":{"name":"","nodes":[],"connections":{}},
  "manual":[{"step":1,"title":"","body":"","credential":"what REPLACE_ME to swap, or empty"}]
 }
-The "workflow" object must be valid, importable n8n JSON. Write 5-7 manual steps ending with test + activate.`})
+"workflow" must be valid, importable n8n JSON. Write one "howItWorks" entry per node. Write 5-7 manual steps ending with test + activate.`}),
 };
 
 /* ---------------- n8n validation before we hand it over ---------------- */
@@ -287,62 +321,66 @@ function validateWorkflow(wf) {
 }
 
 /* ------------------------------ handler ------------------------------ */
-export default async function handler(req, res) {
+export default async function handler(req, res_) {
   if (req.method === "GET") {
     const enabled = !!KEY || KEYLESS;
-    res.status(200).json({ aiEnabled: enabled, provider: PROVIDER, model: enabled ? MODEL : null, local: KEYLESS });
+    res_.status(200).json({ aiEnabled: enabled, provider: PROVIDER, model: enabled ? MODEL : null, local: KEYLESS });
     return;
   }
-  if (req.method !== "POST") { res.status(405).json({ error: "Use POST." }); return; }
+  if (req.method !== "POST") { res_.status(405).json({ error: "Use POST." }); return; }
   if (!KEY && !KEYLESS) {
-    res.status(503).json({ error: "no_key", message: "AI is off. Set LLM_PROVIDER and LLM_API_KEY in your environment variables. For a free local option, set LLM_PROVIDER=ollama." });
+    res_.status(503).json({ error: "no_key", message: "AI is off. Set LLM_PROVIDER and LLM_API_KEY in your environment variables. For a free local option, set LLM_PROVIDER=ollama." });
     return;
   }
 
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : (req.body || {});
     const { type, payload } = body;
-    if (!P[type]) { res.status(400).json({ error: "Unknown type: " + type }); return; }
+    if (!P[type]) { res_.status(400).json({ error: "Unknown type: " + type }); return; }
 
     const p = { ...payload };
     if (type === "brandScan") {
-      if (!p.url) { res.status(400).json({ error: "A website URL is required." }); return; }
+      if (!p.url) { res_.status(400).json({ error: "A website URL is required." }); return; }
       p.pageText = await fetchPageText(p.url);
       if (!p.pageText || p.pageText.length < 120) {
-        res.status(200).json({ found: false, voice: "", product: "", proof: "", audience: "",
+        res_.status(200).json({ found: false, voice: "", product: "", proof: "", audience: "",
           note: "We couldn't read enough text from that page. It may be JavaScript-rendered or blocked. Add your product brief manually below." });
         return;
       }
     }
 
     const { system, user, max } = P[type](p);
-    let raw;
+    let res;
     try {
-      raw = await callLLM(system, user, max || 1500);
+      res = await callLLM(system, user, max || 8000);
     } catch (err) {
       if (KEYLESS && /fetch failed|ECONNREFUSED|connect|network/i.test(String(err.message))) {
-        res.status(503).json({ error: "ollama_offline",
+        res_.status(503).json({ error: "ollama_offline",
           message: `Can't reach Ollama at ${OLLAMA_URL}. Run "ollama serve" and make sure the model is pulled:  ollama pull ${MODEL}` });
         return;
       }
       throw err;
     }
 
+    const raw = res.text;
     let json;
     try { json = parseJSON(raw); }
     catch {
-      res.status(200).json({ raw, parseFailed: true,
-        note: KEYLESS ? "The local model returned text that isn't valid JSON. A larger model (qwen2.5:14b or bigger) handles structured output far better." : "The model returned text that isn't valid JSON." });
+      res_.status(200).json({ raw, parseFailed: true, truncated: res.truncated,
+        note: res.truncated
+          ? "The model ran out of room before finishing. Try a shorter brief, or raise the token limit for this tool in api/generate.js."
+          : (KEYLESS ? "The local model returned text that isn't valid JSON. A larger model (qwen2.5:14b or bigger) handles structured output far better." : "The model returned text that isn't valid JSON.") });
       return;
     }
+    if (res.truncated) json.truncated = true;
 
     if (type === "n8n") {
       const errs = validateWorkflow(json.workflow);
       json.validation = { ok: errs.length === 0, errors: errs };
     }
 
-    res.status(200).json(json);
+    res_.status(200).json(json);
   } catch (e) {
-    res.status(500).json({ error: "ai_failed", message: String(e.message || e) });
+    res_.status(500).json({ error: "ai_failed", message: String(e.message || e) });
   }
 }

@@ -64,7 +64,7 @@ export default function App() {
         </div>
       </div>
 
-      <div className="foot">Free &amp; open source · estimates are planning aids, not guarantees · MIT licensed</div>
+      <div className="foot">Built by Revanth · UAE</div>
     </div>
   );
 }

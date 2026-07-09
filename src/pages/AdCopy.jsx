@@ -122,6 +122,7 @@ export default function AdCopy({ go, ai }) {
                 <ul className="tight">{out.why.map((w,i)=><li key={i}>{w}</li>)}</ul>
               </Block>)}
 
+            {out.truncated && <div className="err">The model was cut off before finishing. Try a shorter brief.</div>}
             {out.raw && <Block title="Raw output"><pre className="raw">{out.raw}</pre>{out.note && <p className="disclaimer">{out.note}</p>}</Block>}
           </div>)}
       </div>

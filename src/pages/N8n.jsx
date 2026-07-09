@@ -4,17 +4,14 @@ import { generate, download } from "../lib/api.js";
 import { Block, Field, Checks, BuildBtn, ErrBox, Loader, Empty, KeyBanner, DownloadIcon } from "../lib/ui.jsx";
 
 export default function N8n({ go, ai }) {
-  const [f, setF] = useState({
-    description: "", trigger: "schedule", frequency: "daily",
-    apps: ["googleSheets", "ai", "telegram"], conditions: ""
-  });
+  const [f, setF] = useState({ description: "", trigger: "auto", frequency: "daily", apps: [], conditions: "" });
   const [out, setOut] = useState(null);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const set = (k, v) => setF((s) => ({ ...s, [k]: v }));
 
   async function run() {
-    if (!f.description.trim()) return setErr("Describe what the workflow should do.");
+    if (!f.description.trim()) return setErr("Describe what the workflow should do — that is all the AI needs.");
     if (!ai?.aiEnabled) return setErr("This tool needs an API key. See the Setup Guide.");
     setErr(""); setLoading(true); setOut(null);
     try { setOut(await generate("n8n", f)); }
@@ -24,6 +21,7 @@ export default function N8n({ go, ai }) {
   }
 
   const fileName = (out?.workflow?.name || "workflow").toLowerCase().replace(/[^a-z0-9]+/g, "-") + ".json";
+  const schedOff = f.trigger === "webhook" || f.trigger === "manual";
 
   return (
     <div>
@@ -33,15 +31,32 @@ export default function N8n({ go, ai }) {
       <div className="card console">
         <div className="hd"><span className="tag">Brief</span><h3>Describe your automation</h3></div>
         <div className="form-grid">
-          <Field label="What should this workflow do?" req full>
+          <Field label="What should this workflow do?" req full hint="Plain English. Everything below is optional — the AI works it out from this.">
             <textarea style={{ minHeight: 92 }} value={f.description} onChange={(e) => set("description", e.target.value)}
-              placeholder="Every morning at 8am, fetch new leads from a Google Sheet, use AI to score each lead 1–10, then send me a Telegram summary of anyone scoring 8 or above." /></Field>
-          <Field label="Trigger type"><select value={f.trigger} onChange={(e) => set("trigger", e.target.value)}>
-            <option value="schedule">Schedule (time-based)</option><option value="webhook">Webhook (incoming request)</option><option value="manual">Manual</option></select></Field>
-          <Field label="How often?"><select value={f.frequency} onChange={(e) => set("frequency", e.target.value)}>
-            <option value="daily">Daily</option><option value="hourly">Hourly</option><option value="weekly">Weekly</option><option value="every 15 minutes">Every 15 minutes</option></select></Field>
-          <div className="f spanfull"><span className="lblspan">Apps &amp; services involved</span>
-            <Checks options={N8N_APPS} value={f.apps} onChange={(v) => set("apps", v)} /></div>
+              placeholder="e.g. When someone messages my clinic on WhatsApp, use AI to understand what they want, book them into Google Calendar, and reply with a confirmation." /></Field>
+
+          <Field label="Trigger type" hint="Leave on auto and the AI picks what your workflow actually needs.">
+            <select value={f.trigger} onChange={(e) => set("trigger", e.target.value)}>
+              <option value="auto">Let the AI decide</option>
+              <option value="schedule">Schedule (time-based)</option>
+              <option value="webhook">Webhook (incoming request)</option>
+              <option value="manual">Manual</option>
+            </select></Field>
+
+          <Field label="How often?" hint={schedOff ? "Not used with this trigger." : "Only applies if the trigger is a schedule."}>
+            <select value={f.frequency} onChange={(e) => set("frequency", e.target.value)} disabled={schedOff}>
+              <option value="daily">Daily</option><option value="hourly">Hourly</option>
+              <option value="weekly">Weekly</option><option value="every 15 minutes">Every 15 minutes</option>
+            </select></Field>
+
+          <div className="f spanfull">
+            <span className="lblspan">Apps &amp; services involved <span style={{ color: "var(--grey-2)", fontWeight: 400 }}>— optional</span></span>
+            <Checks options={N8N_APPS} value={f.apps} onChange={(v) => set("apps", v)} />
+            <p className="hint">{f.apps.length
+              ? "The AI will use these and add anything else the workflow needs."
+              : "Nothing selected — the AI will choose the nodes your workflow needs."}</p>
+          </div>
+
           <Field label="Any conditions or filtering?" full>
             <input type="text" value={f.conditions} onChange={(e) => set("conditions", e.target.value)} placeholder="e.g. Only notify for leads scoring 8 or above" /></Field>
         </div>
@@ -58,36 +73,61 @@ export default function N8n({ go, ai }) {
 
         {!loading && out && (
           <div className="plan">
-            <Block n="1" title="What this workflow does" ai>
-              <p className="ptxt" style={{ marginBottom: 14 }}>{out.summary}</p>
-              {out.flow?.length > 0 && <div className="nodeflow">
-                {out.flow.map((n, i) => (
-                  <React.Fragment key={i}>
-                    <div className={"node " + (n.kind || "action")}><span className="nd" />{n.name}</div>
-                    {i < out.flow.length - 1 && <span className="arrow">→</span>}
-                  </React.Fragment>))}
-              </div>}
-              {out.unsupported && <div className="notdoing" style={{ marginTop: 14 }}><b>Note:</b> {out.unsupported}</div>}
-              <p className="disclaimer">{out.workflow?.nodes?.length || 0} nodes · composed from the verified node library</p>
-            </Block>
+            {out.truncated && <div className="err">The model was cut off before finishing. Some sections may be incomplete — try a shorter description.</div>}
 
-            <Block n="2" title="Workflow JSON" ai>
-              <p className="ptxt">Download this file, then in n8n go to <b>Workflows → Import from File</b>.</p>
-              <div className="jsonbox">
-                <div className="json-h"><span>{fileName}</span>
-                  <button className="dlbtn" onClick={() => download(fileName, JSON.stringify(out.workflow, null, 2))}>
-                    <DownloadIcon />Download JSON</button></div>
-                <pre>{JSON.stringify(out.workflow, null, 2)}</pre>
-              </div>
-              {out.validation && (out.validation.ok
-                ? <div className="valid ok">✓ Validated — every node type and connection checks out. This will import cleanly.</div>
-                : <div className="valid bad"><div><b>Validation warnings:</b><ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
-                    {out.validation.errors.slice(0, 5).map((e, i) => <li key={i}>{e}</li>)}</ul>
-                    <p style={{ margin: "8px 0 0", fontSize: 12 }}>Import may fail. Try regenerating, or use a stronger model.</p></div></div>)}
-            </Block>
+            {out.summary && (
+              <Block n="1" title="What this workflow does" ai>
+                <p className="exec">{out.summary}</p>
+                {out.flow?.length > 0 && (
+                  <div className="nodeflow">
+                    {out.flow.map((n, i) => (
+                      <React.Fragment key={i}>
+                        <div className={"node " + (n.kind || "action")}><span className="nd" />{n.name}</div>
+                        {i < out.flow.length - 1 && <span className="arrow">→</span>}
+                      </React.Fragment>))}
+                  </div>)}
+                {out.triggerReason && <div className="pnote" style={{ marginTop: 14 }}><b>Trigger choice:</b> {out.triggerReason}</div>}
+                {out.unsupported && <div className="notdoing" style={{ marginTop: 14 }}><b>Note:</b> {out.unsupported}</div>}
+                <p className="disclaimer">{out.workflow?.nodes?.length || 0} nodes · composed from the verified node library</p>
+              </Block>)}
+
+            {(out.nodesChosen?.length > 0 || out.howItWorks?.length > 0) && (
+              <Block n="2" title="The nodes, and why each is there" ai>
+                {out.nodesChosen?.length > 0 && (
+                  <div className="stack">
+                    <div className="stack-h">Nodes chosen</div>
+                    {out.nodesChosen.map((n, i) => (
+                      <div className="angle" key={i}>
+                        <span className="ai">{i + 1}</span>
+                        <p><b>{n.name}</b> {n.type && <span>· {n.type}</span>}<br /><span>{n.role}</span></p>
+                      </div>))}
+                  </div>)}
+                {out.howItWorks?.length > 0 && (
+                  <div className="stack">
+                    <div className="stack-h">How it works, step by step</div>
+                    <ul className="tight">{out.howItWorks.map((h, i) => <li key={i}>{h}</li>)}</ul>
+                  </div>)}
+              </Block>)}
+
+            {out.workflow && (
+              <Block n="3" title="Workflow JSON" ai>
+                <p className="ptxt">Download this file, then in n8n go to <b>Workflows → Import from File</b>.</p>
+                <div className="jsonbox">
+                  <div className="json-h"><span>{fileName}</span>
+                    <button className="dlbtn" onClick={() => download(fileName, JSON.stringify(out.workflow, null, 2))}>
+                      <DownloadIcon />Download JSON</button></div>
+                  <pre>{JSON.stringify(out.workflow, null, 2)}</pre>
+                </div>
+                {out.validation && (out.validation.ok
+                  ? <div className="valid ok">✓ Validated — every node type and connection checks out. This will import cleanly.</div>
+                  : <div className="valid bad"><div><b>Validation warnings:</b>
+                      <ul style={{ margin: "6px 0 0", paddingLeft: 18 }}>
+                        {out.validation.errors.slice(0, 5).map((e, i) => <li key={i}>{e}</li>)}</ul>
+                      <p style={{ margin: "8px 0 0", fontSize: 12 }}>Import may fail. Try regenerating, or use a stronger model.</p></div></div>)}
+              </Block>)}
 
             {out.manual?.length > 0 && (
-              <Block n="3" title="Setup manual — connect every node" ai>
+              <Block n="4" title="Setup manual — connect every node" ai>
                 {out.manual.map((m, i) => (
                   <div className="mstep" key={i}><span className="mn">{m.step || i + 1}</span>
                     <div className="mb"><b>{m.title}</b><p>{m.body}</p>

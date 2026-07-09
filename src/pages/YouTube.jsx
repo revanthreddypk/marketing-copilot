@@ -101,6 +101,7 @@ export default function YouTube({ go, ai }) {
               {out.tags && <p className="ptxt" style={{marginTop:10,color:"var(--blue-600)"}}>{out.tags}</p>}
             </Block>
 
+            {out.truncated && <div className="err">The model was cut off before finishing. Try a shorter brief.</div>}
             {out.raw && <Block title="Raw output"><pre className="raw">{out.raw}</pre>{out.note && <p className="disclaimer">{out.note}</p>}</Block>}
           </div>)}
       </div>

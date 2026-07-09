@@ -194,28 +194,40 @@ Return ONLY valid JSON:
 If the page text is empty or unusable, set found=false and leave the other fields as empty strings.`}),
 
   /* ---- Content studio ---- */
-  content: (p) => ({ max: 12000,
-    system: "You are a senior UAE performance copywriter and creative director, fluent in English and native Gulf Arabic. Arabic must read as natural UAE marketing Arabic — never a literal translation.",
+  content: (p) => {
+    const plats = (p.platforms && p.platforms.length) ? p.platforms : ["Meta"];
+    const langs = p.langs && p.langs.length ? p.langs : ["en"];
+    const perPlat = langs.length > 1 ? "2 English AND 2 Arabic" : (langs[0] === "ar" ? "3 Arabic" : "3 English");
+    const wantGoogle = plats.includes("Google");
+    return { max: 12000,
+    system: "You are a senior UAE performance copywriter and creative director, fluent in English and native Gulf Arabic. Arabic must read as natural UAE marketing Arabic — never a literal translation of the English. You write ONLY for the platforms you are asked for.",
     user: `Brand: ${p.business}
 Brand voice: ${p.voice || "confident, warm, direct"}
 Brief: ${p.brief || "(none)"} | Offer: ${p.offer || "(none)"}
-Objective: ${p.objective} | Location: ${p.location} | Languages: ${p.language}
+Objective: ${p.objective} | Location: ${p.location}
 Proof available: ${p.proof || "(none)"}
-Generate: ${(p.types || []).join(", ")}
 
-Return ONLY valid JSON. Include a key ONLY if requested in "Generate":
+PLATFORMS REQUESTED (write for these and ONLY these): ${plats.join(", ")}
+LANGUAGES REQUESTED (write in these and ONLY these): ${langs.map(l => l === "ar" ? "Arabic" : "English").join(" AND ")}
+Sections requested: ${(p.types || []).join(", ")}
+
+HARD RULES — follow exactly:
+1. Produce ${perPlat} ad variants FOR EACH platform listed above. Set "platform" to the exact platform name and "lang" to "en" or "ar".
+2. Do NOT write ads for any platform that is not listed. If Google is not listed, omit "googleRSA" entirely.
+3. ${langs.length > 1 ? 'Every platform must have BOTH English and Arabic variants. Arabic is not optional.' : 'Write only in ' + (langs[0] === "ar" ? "Arabic" : "English") + '.'}
+4. Respect each platform's native format: Meta = hook headline + 2-3 sentence primary text. TikTok = casual, first-person, native caption. Snapchat = punchy, under-35 tone. LinkedIn = professional, value-led.
+
+Return ONLY valid JSON. Include a key ONLY if it was requested:
 {
- "adsMeta":[{"lang":"en|ar","angle":"","headline":"","primary":"","cta":""}],
- "adsGoogle":{"headlines":["",""],"descriptions":["",""]},
- "adsTikTok":{"caption":"","hook":""},
+ "ads":[{"platform":"<exact name from list>","lang":"en|ar","angle":"","headline":"","primary":"","cta":""}]${wantGoogle ? ',\n "googleRSA":{"headlines":["","",""],"descriptions":["",""]}' : ''},
  "hooks":["","","","",""],
  "videoScript":[{"ts":"0–3s","beat":"","say":"","visual":""}],
  "email":{"subject":"","preview":"","body":["",""]},
  "landingCopy":{"headline":"","subhead":"","trustBar":"","cta":""},
- "social":[{"platform":"Instagram|TikTok|X","caption":"","tags":""}],
+ "social":[{"platform":"","caption":"","tags":""}],
  "why":["why these choices work",""]
-}
-For adsMeta produce 2 EN + 2 AR when both languages requested.`}),
+}` };
+  },
 
   /* ---- YouTube: FULL spoken script ---- */
   youtube: (p) => ({ max: 16000,
@@ -377,6 +389,24 @@ export default async function handler(req, res_) {
     if (type === "n8n") {
       const errs = validateWorkflow(json.workflow);
       json.validation = { ok: errs.length === 0, errors: errs };
+    }
+
+    // Enforce platform + language scope even if the model ignored instructions.
+    if (type === "content") {
+      const plats = (p.platforms && p.platforms.length) ? p.platforms : null;
+      const langs = (p.langs && p.langs.length) ? p.langs : null;
+      if (Array.isArray(json.ads)) {
+        json.ads = json.ads.filter((a) =>
+          (!plats || plats.some((x) => String(a.platform || "").toLowerCase().includes(x.toLowerCase()))) &&
+          (!langs || langs.includes(a.lang))
+        );
+      }
+      if (plats && !plats.includes("Google")) delete json.googleRSA;
+      if (langs && !langs.includes("ar")) {
+        if (Array.isArray(json.ads)) json.ads = json.ads.filter((a) => a.lang !== "ar");
+      }
+      json.requestedPlatforms = plats;
+      json.requestedLangs = langs;
     }
 
     res_.status(200).json(json);
